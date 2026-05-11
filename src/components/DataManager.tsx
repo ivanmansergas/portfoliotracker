@@ -34,9 +34,16 @@ export default function DataManager({ state, setState }: DataManagerProps) {
             const dateParts = rawDate.split('/');
             const date = new Date(Number(dateParts[2]), Number(dateParts[1]) - 1, Number(dateParts[0]));
             
-            const rawAmount = cleanRow['Importe estimado'] || cleanRow['Importe'] || '0';
-            // Quitar " EUR", " €", y reemplazar comas por puntos
-            const amountStr = String(rawAmount).replace(/EUR|€/gi, '').replace(',', '.').trim();
+            const parseAmount = (val: any) => {
+              if (!val) return 0;
+              return parseFloat(String(val).replace(/EUR|€/gi, '').replace(/\./g, '').replace(',', '.').trim());
+            };
+
+            const amount = parseAmount(cleanRow['Importe estimado'] || cleanRow['Importe']);
+            const units = parseAmount(cleanRow['Nº de participaciones'] || cleanRow['Nº participaciones']);
+            
+            // Intentar obtener el NAV de compra (Valor liquidativo en MyInvestor)
+            const nav = parseAmount(cleanRow['Valor liquidativo'] || cleanRow['NAV compra'] || cleanRow['Precio de ejecución'] || cleanRow['Precio']);
 
             const isin = cleanRow['ISIN'];
             const concept = cleanRow['Concepto'] || `Orden ${isin || ''}`;
@@ -51,14 +58,26 @@ export default function DataManager({ state, setState }: DataManagerProps) {
               date,
               concept,
               isin,
-              amount: parseFloat(amountStr),
+              amount,
+              units,
+              nav: nav || (units !== 0 ? amount / units : undefined)
             };
           }).filter(t => t !== null && !isNaN(t.date.getTime()) && !isNaN(t.amount)) as Transaction[];
 
-          setState(prev => ({
-            ...prev,
-            transactions: [...prev.transactions, ...newTransactions].sort((a, b) => a.date.getTime() - b.date.getTime())
-          }));
+          setState(prev => {
+            const existingIds = new Set(prev.transactions.map(t => `${t.isin}-${t.date.getTime()}-${t.amount.toFixed(2)}-${t.units.toFixed(4)}`));
+            
+            const uniqueNewTransactions = newTransactions.filter(t => {
+              const key = `${t.isin}-${t.date.getTime()}-${t.amount.toFixed(2)}-${t.units.toFixed(4)}`;
+              if (existingIds.has(key)) return false;
+              return true;
+            });
+
+            return {
+              ...prev,
+              transactions: [...prev.transactions, ...uniqueNewTransactions].sort((a, b) => a.date.getTime() - b.date.getTime())
+            };
+          });
 
           if (fileInputRef.current) fileInputRef.current.value = '';
           alert(`Importadas ${newTransactions.length} transacciones correctamente.`);
@@ -103,9 +122,7 @@ export default function DataManager({ state, setState }: DataManagerProps) {
   };
 
   const clearData = () => {
-    if (confirm('¿Estás seguro de que quieres borrar todos los datos? Esta acción no se puede deshacer.')) {
-      setState({ transactions: [], mappings: {} });
-    }
+    setState({ transactions: [], mappings: {}, fundNames: {} });
   };
 
   return (
@@ -123,7 +140,7 @@ export default function DataManager({ state, setState }: DataManagerProps) {
           </div>
           <h3 className="text-lg font-semibold text-slate-800">Importar CSV de MyInvestor</h3>
           <p className="text-sm text-slate-500">
-            Sube el archivo CSV exportado desde MyInvestor. Debe contener las columnas: <code className="bg-slate-100 px-1 py-0.5 rounded">Fecha de la orden</code>, <code className="bg-slate-100 px-1 py-0.5 rounded">ISIN</code>, <code className="bg-slate-100 px-1 py-0.5 rounded">Importe estimado</code> y <code className="bg-slate-100 px-1 py-0.5 rounded">Estado</code>. Solo se importarán las órdenes finalizadas.
+            Sube el archivo CSV exportado desde MyInvestor. Debe contener las columnas: <code className="bg-slate-100 px-1 py-0.5 rounded">Fecha de la orden</code>, <code className="bg-slate-100 px-1 py-0.5 rounded">ISIN</code>, <code className="bg-slate-100 px-1 py-0.5 rounded">Importe estimado</code>, <code className="bg-slate-100 px-1 py-0.5 rounded">Nº de participaciones</code> y <code className="bg-slate-100 px-1 py-0.5 rounded">Estado</code>. Solo se importarán las órdenes finalizadas.
           </p>
 
           <input

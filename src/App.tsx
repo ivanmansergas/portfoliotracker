@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import { 
   LayoutDashboard, 
   Wallet, 
@@ -8,17 +8,20 @@ import {
   Briefcase
 } from 'lucide-react';
 import { cn } from './lib/utils';
-import { PortfolioState, TabType, Transaction, FundHolding } from './types';
+import { PortfolioState, TabType, FundHolding } from './types';
 import Dashboard from './components/Dashboard';
 import HoldingsTable from './components/HoldingsTable';
 import Simulator from './components/Simulator';
 import DataManager from './components/DataManager';
 import Settings from './components/Settings';
-import { fetchYahooFinancePrice } from './lib/finance';
+import { fetchYahooFinancePrice, fetchHistoricalYearEndPrices, fetchDailyHistoricalPrices } from './lib/finance';
 
 const defaultState: PortfolioState = {
   transactions: [],
-  mappings: {}
+  mappings: {},
+  fundNames: {},
+  historicalPrices: {},
+  currentPrices: {}
 };
 
 function App() {
@@ -28,12 +31,15 @@ function App() {
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        // Revive dates
-        parsed.transactions = parsed.transactions.map((t: any) => ({
-          ...t,
-          date: new Date(t.date)
-        }));
-        return parsed;
+        // Revive dates and merge with defaults to handle new state fields
+        return {
+          ...defaultState,
+          ...parsed,
+          transactions: (parsed.transactions || []).map((t: any) => ({
+            ...t,
+            date: new Date(t.date)
+          }))
+        };
       } catch (e) {
         console.error('Failed to parse saved state');
       }
@@ -57,42 +63,146 @@ function App() {
       if (!holdingMap.has(t.isin)) {
         holdingMap.set(t.isin, {
           isin: t.isin,
-          name: t.concept || t.isin,
+          name: state.fundNames[t.isin] || t.concept || t.isin,
           ticker: state.mappings[t.isin],
           units: 0,
           totalInvested: 0,
         });
       }
       const h = holdingMap.get(t.isin)!;
-      // In MyInvestor CSV, usually amount is positive for contributions.
       h.totalInvested += t.amount;
-      // Note: Accurately tracking units requires unit price at transaction date.
-      // Since CSV might only provide Amount, we approximate or rely on current Nav.
-      // For a real tracker, units would be tracked explicitly.
-      // We will estimate units later if we have currentNav and totalValue.
+      h.units += (t.units || 0);
     });
 
-    setHoldings(Array.from(holdingMap.values()));
-  }, [state.transactions, state.mappings]);
+    setHoldings(Array.from(holdingMap.values()).map(nh => {
+      const savedPrice = state.currentPrices?.[nh.isin];
+      if (savedPrice) {
+        return {
+          ...nh,
+          currentNav: savedPrice.price,
+          navDate: new Date(savedPrice.date),
+          currentValue: nh.units * savedPrice.price
+        };
+      }
+      return nh;
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.transactions, state.mappings, state.currentPrices]);
 
   const updatePrices = async () => {
     setIsUpdatingPrices(true);
-    const updatedHoldings = [...holdings];
+    console.log("Iniciando actualización de precios...");
     
-    for (let h of updatedHoldings) {
-      if (h.ticker) {
-        const price = await fetchYahooFinancePrice(h.ticker);
-        if (price) {
-          h.currentNav = price;
-          h.navDate = new Date();
-          // We can't calculate currentValue precisely without units.
-          // If the user inputs total units somewhere, we can do it.
-          // For now, we will simulate this for demonstration unless added to CSV.
+    try {
+      if (holdings.length === 0) {
+        alert("Primero debes importar tus datos desde la pestaña 'Datos'.");
+        return;
+      }
+
+      const configuredTickers = holdings.filter(h => h.ticker).length;
+      if (configuredTickers === 0) {
+        alert("⚠️ No tienes ningún ticker de Yahoo Finance configurado.\n\nVe a la pestaña 'Ajustes' y vincula tus fondos con sus tickers correspondientes.");
+        return;
+      }
+
+      // Copias para actualizar el estado
+      const updatedHoldings = holdings.map(h => ({ ...h }));
+      const updatedTransactions = [...state.transactions];
+      const newFundNames: Record<string, string> = { ...state.fundNames };
+      const newHistoricalPrices: Record<string, Record<number, number>> = { ...state.historicalPrices };
+      
+      let updatedCount = 0;
+      let recoveredNavs = 0;
+
+      // Procesar fondos secuencialmente para evitar saturar el proxy/API
+      for (let h of updatedHoldings) {
+        if (!h.ticker) continue;
+
+        console.log(`Procesando ${h.ticker}...`);
+        
+        try {
+          // 1. Obtener precio actual
+          const result = await fetchYahooFinancePrice(h.ticker);
+          if (result) {
+            h.currentNav = result.price;
+            h.navDate = new Date();
+            h.currentValue = h.units * result.price;
+            if (result.name) {
+              newFundNames[h.isin] = result.name;
+              h.name = result.name;
+            }
+            updatedCount++;
+          }
+
+          // 2. Obtener cierres anuales (para la vista de detalle)
+          const historical = await fetchHistoricalYearEndPrices(h.ticker);
+          if (Object.keys(historical).length > 0) {
+            newHistoricalPrices[h.isin] = historical;
+          }
+
+          // 3. Recuperación de NAVs históricos (solo si faltan en transacciones)
+          const transactionsToFix = updatedTransactions.filter(t => t.isin === h.isin && !t.nav);
+          if (transactionsToFix.length > 0) {
+            console.log(`Recuperando precios históricos para ${h.ticker}...`);
+            const dailyPrices = await fetchDailyHistoricalPrices(h.ticker);
+            
+            if (Object.keys(dailyPrices).length > 0) {
+              const availableDates = Object.keys(dailyPrices).sort();
+              transactionsToFix.forEach(t => {
+                const targetDate = new Date(t.date);
+                // Buscamos el precio del día siguiente (o el más cercano)
+                targetDate.setDate(targetDate.getDate() + 1);
+                let dateStr = targetDate.toISOString().split('T')[0];
+                
+                if (!dailyPrices[dateStr]) {
+                  const nextDate = availableDates.find(d => d > dateStr);
+                  if (nextDate) dateStr = nextDate;
+                }
+                
+                if (dailyPrices[dateStr]) {
+                  t.nav = dailyPrices[dateStr];
+                  recoveredNavs++;
+                }
+              });
+            }
+          }
+        } catch (err) {
+          console.error(`Error procesando ticker ${h.ticker}:`, err);
         }
       }
+      
+      console.log(`Actualización completada.`);
+      
+      setHoldings(updatedHoldings);
+      setState(prev => ({ 
+        ...prev, 
+        transactions: updatedTransactions,
+        fundNames: newFundNames,
+        historicalPrices: newHistoricalPrices,
+        currentPrices: {
+          ...(prev.currentPrices || {}),
+          ...Object.fromEntries(
+            updatedHoldings
+              .filter(h => h.currentNav !== undefined)
+              .map(h => [h.isin, { price: h.currentNav!, date: new Date().toISOString() }])
+          )
+        }
+      }));
+      
+      if (recoveredNavs > 0) {
+        alert(`✅ ¡Éxito! Se han actualizado los precios y se han recuperado ${recoveredNavs} precios históricos de compra.`);
+      } else if (updatedCount > 0) {
+        alert(`✅ Precios actualizados correctamente.`);
+      } else {
+        alert(`⚠️ No se han podido obtener datos nuevos. Revisa los Tickers en 'Ajustes'.`);
+      }
+      
+    } catch (error) {
+      console.error("Error al actualizar precios:", error);
+      alert("Hubo un error al conectar con Yahoo Finance. Revisa la consola para más detalles.");
+    } finally {
+      setIsUpdatingPrices(false);
     }
-    setHoldings(updatedHoldings);
-    setIsUpdatingPrices(false);
   };
 
   const tabs = [
@@ -143,7 +253,7 @@ function App() {
       <main className="flex-1 p-4 md:p-8 overflow-y-auto">
         <div className="max-w-6xl mx-auto space-y-6">
           {activeTab === 'dashboard' && <Dashboard state={state} holdings={holdings} updatePrices={updatePrices} isUpdatingPrices={isUpdatingPrices} />}
-          {activeTab === 'holdings' && <HoldingsTable holdings={holdings} />}
+          {activeTab === 'holdings' && <HoldingsTable holdings={holdings} transactions={state.transactions} historicalPrices={state.historicalPrices} />}
           {activeTab === 'simulator' && <Simulator />}
           {activeTab === 'data' && <DataManager state={state} setState={setState} />}
           {activeTab === 'settings' && <Settings state={state} setState={setState} holdings={holdings} />}

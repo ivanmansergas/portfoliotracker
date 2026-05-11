@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import { useMemo } from 'react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { RefreshCw, TrendingUp, DollarSign, Percent } from 'lucide-react';
 import { PortfolioState, FundHolding } from '../types';
@@ -25,11 +25,11 @@ export default function Dashboard({ state, holdings, updatePrices, isUpdatingPri
     
     holdings.forEach(h => {
       invested += h.totalInvested;
-      if (h.currentValue) {
+      if (h.currentValue !== undefined) {
         current += h.currentValue;
       } else {
-        // Fallback mockup
-        current += h.totalInvested * 1.08;
+        // Usar el invertido si aún no se han cargado los precios
+        current += h.totalInvested;
       }
     });
 
@@ -86,6 +86,16 @@ export default function Dashboard({ state, holdings, updatePrices, isUpdatingPri
           <span className="text-sm font-medium">Actualizar Precios</span>
         </button>
       </div>
+
+      {holdings.length > 0 && holdings.every(h => !h.ticker) && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-start gap-3 text-amber-800 animate-fadeIn">
+          <div className="mt-0.5">⚠️</div>
+          <div className="text-sm">
+            <p className="font-semibold">Faltan los Tickers de Yahoo Finance</p>
+            <p className="mt-0.5 opacity-90">Tu cartera está cargada pero no has vinculado los fondos con sus tickers. Ve a la pestaña de <strong>Ajustes</strong> para configurarlos y ver la rentabilidad real.</p>
+          </div>
+        </div>
+      )}
 
       {/* Metric Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">

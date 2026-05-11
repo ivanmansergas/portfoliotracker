@@ -4,6 +4,8 @@ export interface Transaction {
   concept: string;
   isin: string;
   amount: number; // positive for deposit, negative for withdrawal
+  units: number;  // number of shares/units
+  nav?: number;   // price at acquisition
 }
 
 export interface FundHolding {
@@ -20,6 +22,9 @@ export interface FundHolding {
 export interface PortfolioState {
   transactions: Transaction[];
   mappings: Record<string, string>; // ISIN -> Ticker
+  fundNames: Record<string, string>; // ISIN -> Fund Name (from Yahoo Finance)
+  historicalPrices: Record<string, Record<number, number>>; // ISIN -> Year -> Price
+  currentPrices: Record<string, { price: number; date: string }>; // ISIN -> Price Data
 }
 
 export type TabType = 'dashboard' | 'holdings' | 'simulator' | 'data' | 'settings';
